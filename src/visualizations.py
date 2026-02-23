@@ -2,6 +2,7 @@ from pathlib import Path
 import re
 import pandas as pd
 import matplotlib.pyplot as plt
+import seaborn as sns
 from collections import Counter
 from sklearn.feature_extraction.text import CountVectorizer
 
@@ -25,6 +26,8 @@ def main():
     out_dir = project_root / "outputs" / "figures"
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    sns.set_theme(style="whitegrid")
+
     # Inputs
     emails_path = project_root / "outputs" / "emails.parquet"
     sentiment_path = project_root / "outputs" / "sentiment.csv"
@@ -45,11 +48,11 @@ def main():
     df = read.merge(sent[["email_id", "compound"]], on="email_id", how="inner")
 
     # ----------------------------
-    # 1) Metric histograms (Matplotlib)
+    # 1) Metric histograms (Seaborn)
     # ----------------------------
     def hist_plot(series, title, xlabel, filename, bins=30):
         plt.figure(figsize=(8, 5))
-        plt.hist(series.dropna(), bins=bins)
+        sns.histplot(series.dropna(), bins=bins, color="#4C72B0")
         plt.title(title)
         plt.xlabel(xlabel)
         plt.ylabel("Frequency")
@@ -63,15 +66,23 @@ def main():
     hist_plot(df["lexical_diversity"], "Lexical Diversity Distribution", "Lexical Diversity", "lexical_diversity_distribution.png", bins=25)
 
     # ----------------------------
-    # 2) Summary boxplot (Matplotlib)
+    # 2) Summary boxplot (Seaborn)
     # ----------------------------
     metrics = df[["compound", "flesch_kincaid_grade", "avg_sentence_length", "lexical_diversity"]].dropna()
+    metrics_long = metrics.melt(var_name="metric", value_name="value")
+    label_map = {
+        "compound": "Sentiment",
+        "flesch_kincaid_grade": "Grade",
+        "avg_sentence_length": "Sent Len",
+        "lexical_diversity": "Lex Div",
+    }
+    metrics_long["metric"] = metrics_long["metric"].map(label_map)
+
     plt.figure(figsize=(10, 6))
-    plt.boxplot(
-        [metrics["compound"], metrics["flesch_kincaid_grade"], metrics["avg_sentence_length"], metrics["lexical_diversity"]],
-        tick_labels=["Sentiment", "Grade", "Sent Len", "Lex Div"]
-    )
+    sns.boxplot(data=metrics_long, x="metric", y="value")
     plt.title("Distribution of Key Linguistic Metrics")
+    plt.xlabel("")
+    plt.ylabel("Value")
     plt.tight_layout()
     plt.savefig(out_dir / "summary_boxplot.png", dpi=300)
     plt.close()
@@ -109,12 +120,12 @@ def main():
     top_words_df.to_csv(out_dir / "top_words_counts.csv", index=False)
 
     # plot horizontal bar
-    words = top_words_df["word"].tolist()[::-1]
-    freqs = top_words_df["count"].tolist()[::-1]
+    top_words_plot = top_words_df.sort_values("count", ascending=True)
     plt.figure(figsize=(10, 7))
-    plt.barh(words, freqs)
+    sns.barplot(data=top_words_plot, x="count", y="word", orient="h", color="#4C72B0")
     plt.title(f"Top {top_n} Most Common Words (Stopwords and Template Words Removed)")
     plt.xlabel("Count")
+    plt.ylabel("")
     plt.tight_layout()
     plt.savefig(out_dir / "top_words_bar.png", dpi=300)
     plt.close()
@@ -147,9 +158,10 @@ def main():
     bigrams_df.to_csv(out_dir / "top_bigrams_counts.csv", index=False)
 
     plt.figure(figsize=(10, 7))
-    plt.barh(top_terms, top_freqs)
+    sns.barplot(data=bigrams_df, x="count", y="bigram", orient="h", color="#4C72B0")
     plt.title(f"Top {top_bi} Most Common Bigrams")
     plt.xlabel("Count")
+    plt.ylabel("")
     plt.tight_layout()
     plt.savefig(out_dir / "top_bigrams_bar.png", dpi=300)
     plt.close()

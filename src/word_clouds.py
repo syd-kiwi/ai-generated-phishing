@@ -46,7 +46,13 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if not emails_path.exists():
-        raise FileNotFoundError(f"Missing {emails_path}")
+        if is_enron:
+            raise FileNotFoundError(
+                f"Missing {emails_path}. Run: python src/enron_chunk_analysis.py --input data/enron_spam_data.csv --output-dir outputs/enron"
+            )
+        raise FileNotFoundError(
+            f"Missing {emails_path}. Run the phishing pipeline first, or run with --source enron after generating outputs/enron/*."
+        )
     if not topics_path.exists():
         raise FileNotFoundError(f"Missing {topics_path}. Run src/03_topics.py first.")
 

@@ -21,43 +21,28 @@ def clean_text(t: str) -> str:
 
 def main():
     parser = argparse.ArgumentParser(description="Generate topic word clouds.")
-    parser.add_argument(
-        "--source",
-        choices=["auto", "enron", "phishing"],
-        default="auto",
-        help="Dataset source to render word clouds for (default: auto-detect).",
-    )
-    parser.add_argument(
-        "--enron",
-        action="store_true",
-        help="Shortcut for --source enron.",
-    )
     parser.add_argument("--emails-path", default=None, help="Path to emails/features table (parquet/csv).")
     parser.add_argument("--topics-path", default=None, help="Path to topic assignments CSV.")
     parser.add_argument("--output-dir", default=None, help="Directory to write word cloud image.")
     parser.add_argument("--topic-col", default=None, help="Topic column name (e.g., topic_id, dominant_topic).")
+    parser.add_argument("--enron", action="store_true", help="Use outputs/enron/* inputs.")
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parents[1]
-    default_enron_emails = project_root / "outputs" / "enron" / "message_level_features.csv"
-    default_enron_topics = project_root / "outputs" / "enron" / "topic_assignments.csv"
-
     if args.enron:
-        selected_source = "enron"
-    elif args.source == "auto":
-        selected_source = "enron" if (default_enron_emails.exists() and default_enron_topics.exists()) else "phishing"
-    else:
-        selected_source = args.source
-
-    is_enron = selected_source == "enron"
-    if is_enron:
-        emails_path = Path(args.emails_path) if args.emails_path else default_enron_emails
-        topics_path = Path(args.topics_path) if args.topics_path else default_enron_topics
+        emails_path = Path(args.emails_path) if args.emails_path else (
+            project_root / "outputs" / "enron" / "message_level_features.csv"
+        )
+        topics_path = Path(args.topics_path) if args.topics_path else (
+            project_root / "outputs" / "enron" / "topic_assignments.csv"
+        )
     else:
         emails_path = Path(args.emails_path) if args.emails_path else (project_root / "outputs" / "emails.parquet")
         topics_path = Path(args.topics_path) if args.topics_path else (project_root / "outputs" / "topics.csv")
 
-    out_dir = Path(args.output_dir) if args.output_dir else (project_root / "outputs" / ("enron/wordclouds" if is_enron else "wordclouds"))
+    out_dir = Path(args.output_dir) if args.output_dir else (
+        project_root / "outputs" / ("enron/wordclouds" if args.enron else "wordclouds")
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if not emails_path.exists():
@@ -69,18 +54,12 @@ def main():
             f"Missing {emails_path}. Run the phishing pipeline first, or run with --source enron after generating outputs/enron/*."
         )
     if not topics_path.exists():
-        if is_enron:
-            raise FileNotFoundError(
-                f"Missing {topics_path}. Run: python src/enron_chunk_analysis.py --input data/enron_spam_data.csv --output-dir outputs/enron"
-            )
-        raise FileNotFoundError(
-            f"Missing {topics_path}. Run src/email_topics.py first, or run with --source enron."
-        )
+        raise FileNotFoundError(f"Missing {topics_path}. Run src/03_topics.py first.")
 
     emails = pd.read_parquet(emails_path) if emails_path.suffix == ".parquet" else pd.read_csv(emails_path)
     topics = pd.read_csv(topics_path)
 
-    if is_enron:
+    if args.enron:
         join_keys = [k for k in ["message_id", "label"] if k in emails.columns and k in topics.columns]
         if "combined_text" in emails.columns:
             emails["text"] = emails["combined_text"].fillna("").astype(str)

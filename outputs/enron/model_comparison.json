@@ -1,0 +1,36 @@
+{
+  "n_samples": 33716,
+  "n_train": 26972,
+  "n_test": 6744,
+  "label_counts": {
+    "spam": 17171,
+    "ham": 16545
+  },
+  "baseline_logistic_regression": {
+    "accuracy": 0.9890272835112692,
+    "precision": 0.9852728847819809,
+    "recall": 0.9933042212518195,
+    "f1": 0.9892722528269063,
+    "roc_auc": 0.9990561667860974,
+    "confusion_matrix": {
+      "tn": 3258,
+      "fp": 51,
+      "fn": 23,
+      "tp": 3412
+    }
+  },
+  "xgboost_backend": "xgboost",
+  "xgboost_or_fallback": {
+    "accuracy": 0.9854685646500593,
+    "precision": 0.9776696249642142,
+    "recall": 0.9941775836972343,
+    "f1": 0.9858545034642032,
+    "roc_auc": 0.9989929102535848,
+    "confusion_matrix": {
+      "tn": 3231,
+      "fp": 78,
+      "fn": 20,
+      "tp": 3415
+    }
+  }
+}

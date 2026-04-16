@@ -46,6 +46,22 @@ def lexical_diversity(text: str) -> float:
     return len(set(words)) / len(words)
 
 
+def unique_word_count(text: str) -> int:
+    words = [w.lower() for w in WORD_RE.findall(text)]
+    return len(set(words))
+
+
+def hapax_legomena_ratio(text: str) -> float:
+    words = [w.lower() for w in WORD_RE.findall(text)]
+    if not words:
+        return 0.0
+    counts: dict[str, int] = {}
+    for w in words:
+        counts[w] = counts.get(w, 0) + 1
+    hapax = sum(1 for c in counts.values() if c == 1)
+    return hapax / len(words)
+
+
 def average_word_length(text: str) -> float:
     words = WORD_RE.findall(text)
     if not words:
@@ -128,9 +144,12 @@ def build_feature_frame(df: pd.DataFrame) -> pd.DataFrame:
     out["word_count"] = out["combined_text"].apply(count_words)
     out["sentence_count"] = out["combined_text"].apply(count_sentences)
     out["char_count"] = out["combined_text"].str.len()
+    out["unique_word_count"] = out["combined_text"].apply(unique_word_count)
     out["avg_word_length"] = out["combined_text"].apply(average_word_length)
     out["lexical_diversity"] = out["combined_text"].apply(lexical_diversity)
+    out["hapax_legomena_ratio"] = out["combined_text"].apply(hapax_legomena_ratio)
     out["flesch_kincaid_grade"] = out["combined_text"].apply(safe_flesch_kincaid_grade)
+    out["avg_sentence_length"] = out["word_count"] / out["sentence_count"].replace(0, 1)
 
     try:
         nltk.data.find("sentiment/vader_lexicon.zip")
@@ -150,9 +169,12 @@ def make_label_summary(df: pd.DataFrame) -> pd.DataFrame:
         "word_count",
         "sentence_count",
         "char_count",
+        "unique_word_count",
         "avg_word_length",
         "lexical_diversity",
+        "hapax_legomena_ratio",
         "flesch_kincaid_grade",
+        "avg_sentence_length",
         "neg",
         "neu",
         "pos",
@@ -235,9 +257,12 @@ def model_comparison(df: pd.DataFrame) -> dict:
         "word_count",
         "sentence_count",
         "char_count",
+        "unique_word_count",
         "avg_word_length",
         "lexical_diversity",
+        "hapax_legomena_ratio",
         "flesch_kincaid_grade",
+        "avg_sentence_length",
         "neg",
         "neu",
         "pos",
@@ -296,10 +321,17 @@ def model_comparison(df: pd.DataFrame) -> dict:
         )
         backend = "xgboost"
     except ModuleNotFoundError:
-        from sklearn.ensemble import HistGradientBoostingClassifier
+        from sklearn.ensemble import RandomForestClassifier
 
-        xgb_model = HistGradientBoostingClassifier(learning_rate=0.08, max_depth=8, random_state=42)
-        backend = "hist_gradient_boosting_fallback"
+        # Fallback must support sparse matrices emitted by the text+numeric
+        # ColumnTransformer. RandomForestClassifier can consume sparse input.
+        xgb_model = RandomForestClassifier(
+            n_estimators=300,
+            random_state=42,
+            n_jobs=4,
+            class_weight="balanced_subsample",
+        )
+        backend = "random_forest_fallback"
 
     xgb_pipe = Pipeline(steps=[("prep", prep), ("model", xgb_model)])
     xgb_pipe.fit(X_train, y_train)
@@ -334,8 +366,55 @@ def main() -> None:
     topic_assignments, topic_words = lda_topics(featured)
     models = model_comparison(featured)
 
+    readability_cols = [
+        "message_id",
+        "label",
+        "date",
+        "word_count",
+        "sentence_count",
+        "char_count",
+        "avg_sentence_length",
+        "flesch_kincaid_grade",
+    ]
+    lexical_cols = [
+        "message_id",
+        "label",
+        "date",
+        "word_count",
+        "unique_word_count",
+        "avg_word_length",
+        "lexical_diversity",
+        "hapax_legomena_ratio",
+    ]
+    sentiment_cols = [
+        "message_id",
+        "label",
+        "date",
+        "neg",
+        "neu",
+        "pos",
+        "compound",
+    ]
+
     featured.to_csv(output_dir / "message_level_features.csv", index=False)
+    featured[readability_cols].to_csv(output_dir / "readability_features.csv", index=False)
+    featured[lexical_cols].to_csv(output_dir / "lexical_features.csv", index=False)
+    featured[sentiment_cols].to_csv(output_dir / "sentiment_features.csv", index=False)
     summary.to_csv(output_dir / "spam_ham_summary.csv", index=False)
+    summary_readability = (
+        featured.groupby("label")[["avg_sentence_length", "flesch_kincaid_grade"]]
+        .agg(["mean", "median", "std"])
+        .reset_index()
+    )
+    summary_lexical = (
+        featured.groupby("label")[["avg_word_length", "lexical_diversity", "hapax_legomena_ratio"]]
+        .agg(["mean", "median", "std"])
+        .reset_index()
+    )
+    summary_sentiment = featured.groupby("label")[["neg", "neu", "pos", "compound"]].agg(["mean", "median", "std"]).reset_index()
+    summary_readability.to_csv(output_dir / "readability_summary.csv", index=False)
+    summary_lexical.to_csv(output_dir / "lexical_summary.csv", index=False)
+    summary_sentiment.to_csv(output_dir / "sentiment_summary.csv", index=False)
     terms.to_csv(output_dir / "top_terms_by_label.csv", index=False)
     if not topic_assignments.empty:
         topic_assignments.to_csv(output_dir / "topic_assignments.csv", index=False)
@@ -347,7 +426,13 @@ def main() -> None:
     print("Label counts:")
     print(featured["label"].value_counts())
     print(f"Wrote: {output_dir / 'message_level_features.csv'}")
+    print(f"Wrote: {output_dir / 'readability_features.csv'}")
+    print(f"Wrote: {output_dir / 'lexical_features.csv'}")
+    print(f"Wrote: {output_dir / 'sentiment_features.csv'}")
     print(f"Wrote: {output_dir / 'spam_ham_summary.csv'}")
+    print(f"Wrote: {output_dir / 'readability_summary.csv'}")
+    print(f"Wrote: {output_dir / 'lexical_summary.csv'}")
+    print(f"Wrote: {output_dir / 'sentiment_summary.csv'}")
     print(f"Wrote: {output_dir / 'top_terms_by_label.csv'}")
     if not topic_assignments.empty:
         print(f"Wrote: {output_dir / 'topic_assignments.csv'}")

@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import re
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -12,7 +11,9 @@ import textstat
 import nltk
 from nltk.sentiment import SentimentIntensityAnalyzer
 from sklearn.compose import ColumnTransformer
-from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.decomposition import LatentDirichletAllocation
+from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
     confusion_matrix,
@@ -25,20 +26,8 @@ from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-
-FILE_RE = re.compile(r"(?im)^\s*file\s*:\s*(.+?)\s*$")
-MESSAGE_RE = re.compile(r"(?im)^\s*message\s*:\s*$")
-LABEL_RE = re.compile(r"(?im)^\s*(?:label\s*:\s*)?(spam|ham)\s*$")
 WORD_RE = re.compile(r"[A-Za-z0-9']+")
 SENTENCE_SPLIT_RE = re.compile(r"[.!?]+")
-
-
-@dataclass
-class ChunkRecord:
-    chunk_id: int
-    source_file: str
-    message: str
-    label: str
 
 
 def count_words(text: str) -> int:
@@ -103,68 +92,50 @@ def safe_flesch_kincaid_grade(text: str) -> float:
         return float(fallback_flesch_kincaid_grade(text))
 
 
-def parse_chunks(raw_text: str) -> list[ChunkRecord]:
-    file_matches = list(FILE_RE.finditer(raw_text))
-    chunks: list[ChunkRecord] = []
+def normalize_label(value: str) -> str:
+    v = str(value).strip().lower()
+    if v in {"spam", "1", "true"}:
+        return "spam"
+    return "ham"
 
-    if not file_matches:
-        return chunks
 
-    for idx, match in enumerate(file_matches):
-        start = match.start()
-        end = file_matches[idx + 1].start() if idx + 1 < len(file_matches) else len(raw_text)
-        block = raw_text[start:end].strip()
+def load_enron_csv(input_path: Path) -> pd.DataFrame:
+    df = pd.read_csv(input_path)
 
-        source_file = match.group(1).strip()
-
-        message_marker = MESSAGE_RE.search(block)
-        if not message_marker:
-            continue
-
-        body_start = message_marker.end()
-        post_message = block[body_start:].strip("\n")
-        lines = post_message.splitlines()
-
-        label = None
-        label_line_idx = None
-        for rev_idx, line in enumerate(reversed(lines)):
-            m = LABEL_RE.match(line.strip())
-            if m:
-                label = m.group(1).lower()
-                label_line_idx = len(lines) - 1 - rev_idx
-                break
-
-        if label is None:
-            continue
-
-        message_lines = lines[:label_line_idx]
-        message = "\n".join(message_lines).strip()
-
-        chunks.append(
-            ChunkRecord(
-                chunk_id=len(chunks),
-                source_file=source_file,
-                message=message,
-                label=label,
-            )
+    col_map = {c.lower().strip(): c for c in df.columns}
+    required = ["message id", "subject", "message", "spam/ham", "date"]
+    missing = [c for c in required if c not in col_map]
+    if missing:
+        raise ValueError(
+            f"Missing required CSV columns: {missing}. Expected columns: Message ID,Subject,Message,Spam/Ham,Date"
         )
 
-    return chunks
+    out = pd.DataFrame(
+        {
+            "message_id": df[col_map["message id"]].astype(str),
+            "subject": df[col_map["subject"]].fillna("").astype(str),
+            "message": df[col_map["message"]].fillna("").astype(str),
+            "label": df[col_map["spam/ham"]].apply(normalize_label),
+            "date": df[col_map["date"]].astype(str),
+        }
+    )
+    out["combined_text"] = out["subject"] + "\n" + out["message"]
+    return out
 
 
 def build_feature_frame(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-    out["word_count"] = out["message"].apply(count_words)
-    out["sentence_count"] = out["message"].apply(count_sentences)
-    out["char_count"] = out["message"].str.len()
-    out["avg_word_length"] = out["message"].apply(average_word_length)
-    out["lexical_diversity"] = out["message"].apply(lexical_diversity)
-    out["flesch_kincaid_grade"] = out["message"].apply(safe_flesch_kincaid_grade)
+    out["word_count"] = out["combined_text"].apply(count_words)
+    out["sentence_count"] = out["combined_text"].apply(count_sentences)
+    out["char_count"] = out["combined_text"].str.len()
+    out["avg_word_length"] = out["combined_text"].apply(average_word_length)
+    out["lexical_diversity"] = out["combined_text"].apply(lexical_diversity)
+    out["flesch_kincaid_grade"] = out["combined_text"].apply(safe_flesch_kincaid_grade)
 
     try:
         nltk.data.find("sentiment/vader_lexicon.zip")
         sia = SentimentIntensityAnalyzer()
-        sentiment_df = out["message"].apply(sia.polarity_scores).apply(pd.Series)
+        sentiment_df = out["combined_text"].apply(sia.polarity_scores).apply(pd.Series)
     except LookupError:
         sentiment_df = pd.DataFrame(
             [{"neg": 0.0, "neu": 1.0, "pos": 0.0, "compound": 0.0}] * len(out)
@@ -174,18 +145,91 @@ def build_feature_frame(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def train_xgboost_classifier(df: pd.DataFrame) -> dict:
-    model_name = "xgboost"
-    try:
-        from xgboost import XGBClassifier
-    except ModuleNotFoundError:
-        from sklearn.ensemble import HistGradientBoostingClassifier
+def make_label_summary(df: pd.DataFrame) -> pd.DataFrame:
+    numeric_cols = [
+        "word_count",
+        "sentence_count",
+        "char_count",
+        "avg_word_length",
+        "lexical_diversity",
+        "flesch_kincaid_grade",
+        "neg",
+        "neu",
+        "pos",
+        "compound",
+    ]
+    return df.groupby("label")[numeric_cols].agg(["count", "mean", "median", "std"]).reset_index()
 
-        XGBClassifier = None
-        model_name = "hist_gradient_boosting_fallback"
 
+def top_terms_by_label(df: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:
+    rows = []
+    for label, group in df.groupby("label"):
+        vectorizer = CountVectorizer(stop_words="english", ngram_range=(1, 2), max_features=4000)
+        X = vectorizer.fit_transform(group["combined_text"])
+        counts = np.asarray(X.sum(axis=0)).ravel()
+        vocab = np.array(vectorizer.get_feature_names_out())
+        top_idx = np.argsort(counts)[::-1][:top_n]
+        for i in top_idx:
+            rows.append({"label": label, "term": vocab[i], "count": int(counts[i])})
+    return pd.DataFrame(rows)
+
+
+def lda_topics(df: pd.DataFrame, n_components: int = 6, top_words: int = 12) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if len(df) < 3:
+        return pd.DataFrame(), pd.DataFrame()
+
+    n_components = max(2, min(n_components, len(df) - 1))
+
+    vectorizer = CountVectorizer(stop_words="english", max_features=2500)
+    X = vectorizer.fit_transform(df["combined_text"])
+
+    lda = LatentDirichletAllocation(n_components=n_components, random_state=42)
+    doc_topic = lda.fit_transform(X)
+
+    topic_assignments = pd.DataFrame(
+        {
+            "message_id": df["message_id"],
+            "label": df["label"],
+            "dominant_topic": np.argmax(doc_topic, axis=1),
+        }
+    )
+
+    vocab = np.array(vectorizer.get_feature_names_out())
+    topic_rows = []
+    for topic_id, comp in enumerate(lda.components_):
+        idx = np.argsort(comp)[::-1][:top_words]
+        topic_rows.append(
+            {
+                "topic": topic_id,
+                "top_words": ", ".join(vocab[idx]),
+            }
+        )
+    topic_words = pd.DataFrame(topic_rows)
+    return topic_assignments, topic_words
+
+
+def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray, y_prob: np.ndarray) -> dict:
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+    return {
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "precision": float(precision_score(y_true, y_pred, zero_division=0)),
+        "recall": float(recall_score(y_true, y_pred, zero_division=0)),
+        "f1": float(f1_score(y_true, y_pred, zero_division=0)),
+        "roc_auc": float(roc_auc_score(y_true, y_prob)),
+        "confusion_matrix": {"tn": int(tn), "fp": int(fp), "fn": int(fn), "tp": int(tp)},
+    }
+
+
+def model_comparison(df: pd.DataFrame) -> dict:
+    label_counts = df["label"].value_counts()
     if df["label"].nunique() < 2:
-        raise ValueError("Need both ham and spam samples to train XGBoost classifier.")
+        raise ValueError("Need both spam and ham labels to train classifiers.")
+    if int(label_counts.min()) < 2:
+        return {
+            "status": "not_trained_too_few_examples_per_class",
+            "label_counts": label_counts.to_dict(),
+            "note": "Need at least 2 messages per class.",
+        }
 
     feature_cols = [
         "word_count",
@@ -200,29 +244,48 @@ def train_xgboost_classifier(df: pd.DataFrame) -> dict:
         "compound",
     ]
 
-    X = df[["message", *feature_cols]]
+    X = df[["combined_text", *feature_cols]]
     y = (df["label"] == "spam").astype(int)
 
-    test_size = 0.2 if len(df) >= 25 else 0.33
     X_train, X_test, y_train, y_test = train_test_split(
         X,
         y,
-        test_size=test_size,
+        test_size=0.2 if len(df) >= 25 else 0.33,
         random_state=42,
         stratify=y,
     )
 
-    preprocessor = ColumnTransformer(
+    prep = ColumnTransformer(
         transformers=[
-            ("text", TfidfVectorizer(ngram_range=(1, 2), min_df=1, max_features=8000), "message"),
+            ("text", TfidfVectorizer(ngram_range=(1, 2), max_features=10000), "combined_text"),
             ("num", Pipeline([("scale", StandardScaler(with_mean=False))]), feature_cols),
-        ],
+        ]
     )
 
-    if XGBClassifier is not None:
-        model = XGBClassifier(
-            n_estimators=250,
-            max_depth=4,
+    baseline = Pipeline(
+        steps=[
+            ("prep", prep),
+            ("model", LogisticRegression(max_iter=1000, class_weight="balanced")),
+        ]
+    )
+    baseline.fit(X_train, y_train)
+    baseline_pred = baseline.predict(X_test)
+    baseline_prob = baseline.predict_proba(X_test)[:, 1]
+
+    results = {
+        "n_samples": int(len(df)),
+        "n_train": int(len(X_train)),
+        "n_test": int(len(X_test)),
+        "label_counts": label_counts.to_dict(),
+        "baseline_logistic_regression": compute_metrics(y_test, baseline_pred, baseline_prob),
+    }
+
+    try:
+        from xgboost import XGBClassifier
+
+        xgb_model = XGBClassifier(
+            n_estimators=300,
+            max_depth=5,
             learning_rate=0.08,
             subsample=0.9,
             colsample_bytree=0.9,
@@ -231,121 +294,67 @@ def train_xgboost_classifier(df: pd.DataFrame) -> dict:
             random_state=42,
             n_jobs=4,
         )
-    else:
-        model = HistGradientBoostingClassifier(
-            learning_rate=0.08,
-            max_depth=6,
-            random_state=42,
-        )
+        backend = "xgboost"
+    except ModuleNotFoundError:
+        from sklearn.ensemble import HistGradientBoostingClassifier
 
-    clf = Pipeline(
-        steps=[
-            ("prep", preprocessor),
-            ("model", model),
-        ]
-    )
+        xgb_model = HistGradientBoostingClassifier(learning_rate=0.08, max_depth=8, random_state=42)
+        backend = "hist_gradient_boosting_fallback"
 
-    clf.fit(X_train, y_train)
+    xgb_pipe = Pipeline(steps=[("prep", prep), ("model", xgb_model)])
+    xgb_pipe.fit(X_train, y_train)
+    xgb_pred = xgb_pipe.predict(X_test)
+    xgb_prob = xgb_pipe.predict_proba(X_test)[:, 1]
 
-    y_pred = clf.predict(X_test)
-    y_prob = clf.predict_proba(X_test)[:, 1]
+    results["xgboost_backend"] = backend
+    results["xgboost_or_fallback"] = compute_metrics(y_test, xgb_pred, xgb_prob)
 
-    tn, fp, fn, tp = confusion_matrix(y_test, y_pred).ravel()
-
-    return {
-        "model_used": model_name,
-        "n_samples": int(len(df)),
-        "n_train": int(len(X_train)),
-        "n_test": int(len(X_test)),
-        "accuracy": float(accuracy_score(y_test, y_pred)),
-        "precision": float(precision_score(y_test, y_pred, zero_division=0)),
-        "recall": float(recall_score(y_test, y_pred, zero_division=0)),
-        "f1": float(f1_score(y_test, y_pred, zero_division=0)),
-        "roc_auc": float(roc_auc_score(y_test, y_prob)),
-        "confusion_matrix": {
-            "tn": int(tn),
-            "fp": int(fp),
-            "fn": int(fn),
-            "tp": int(tp),
-        },
-    }
-
-
-def resolve_input_file(path: Path) -> Path:
-    if path.is_file():
-        return path
-
-    if path.is_dir():
-        candidates = sorted(
-            [
-                p
-                for p in path.iterdir()
-                if p.is_file() and p.suffix.lower() in {".txt", ".csv", ".log"}
-            ]
-        )
-        if not candidates:
-            raise FileNotFoundError(f"No candidate text-like files found under {path}")
-        return candidates[0]
-
-    raise FileNotFoundError(f"Input path does not exist: {path}")
+    return results
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Parse chunked Enron-like file/message/label text, analyze ham-only chunks, and train XGBoost spam classifier."
+            "Analyze spam vs ham from CSV schema Message ID,Subject,Message,Spam/Ham,Date and compare baseline vs XGBoost."
         )
     )
-    parser.add_argument(
-        "--input",
-        default="data/enron",
-        help="Path to a single file or a directory containing the chunked file. Defaults to data/enron.",
-    )
-    parser.add_argument(
-        "--output-dir",
-        default="outputs/enron",
-        help="Directory where outputs are written.",
-    )
-
+    parser.add_argument("--input", required=True, help="CSV file path with columns Message ID,Subject,Message,Spam/Ham,Date")
+    parser.add_argument("--output-dir", default="outputs/enron", help="Output directory for reports.")
     args = parser.parse_args()
 
-    input_path = resolve_input_file(Path(args.input))
+    input_path = Path(args.input)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    raw_text = input_path.read_text(encoding="utf-8", errors="ignore")
-    records = parse_chunks(raw_text)
+    df = load_enron_csv(input_path)
+    featured = build_feature_frame(df)
 
-    if not records:
-        raise RuntimeError(
-            "No valid chunks parsed. Expected repeated blocks with file:, message:, and final spam/ham label line."
-        )
+    summary = make_label_summary(featured)
+    terms = top_terms_by_label(featured, top_n=20)
+    topic_assignments, topic_words = lda_topics(featured)
+    models = model_comparison(featured)
 
-    parsed_df = pd.DataFrame([r.__dict__ for r in records])
-    parsed_df = build_feature_frame(parsed_df)
+    featured.to_csv(output_dir / "message_level_features.csv", index=False)
+    summary.to_csv(output_dir / "spam_ham_summary.csv", index=False)
+    terms.to_csv(output_dir / "top_terms_by_label.csv", index=False)
+    if not topic_assignments.empty:
+        topic_assignments.to_csv(output_dir / "topic_assignments.csv", index=False)
+        topic_words.to_csv(output_dir / "topic_words.csv", index=False)
+    (output_dir / "model_comparison.json").write_text(json.dumps(models, indent=2), encoding="utf-8")
 
-    ham_df = parsed_df[parsed_df["label"] == "ham"].copy()
-
-    parsed_path = output_dir / "parsed_chunks.csv"
-    ham_path = output_dir / "ham_only_analysis.csv"
-    metrics_path = output_dir / "xgboost_metrics.json"
-
-    parsed_df.to_csv(parsed_path, index=False)
-    ham_df.to_csv(ham_path, index=False)
-
-    metrics = train_xgboost_classifier(parsed_df)
-    metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
-
-    print(f"Input file: {input_path}")
-    print(f"Total parsed chunks: {len(parsed_df)}")
+    print(f"Input: {input_path}")
+    print(f"Rows: {len(featured)}")
     print("Label counts:")
-    print(parsed_df["label"].value_counts())
-    print(f"Ham chunks analyzed: {len(ham_df)}")
-    print(f"Wrote: {parsed_path}")
-    print(f"Wrote: {ham_path}")
-    print(f"Wrote: {metrics_path}")
-    print("XGBoost metrics:")
-    print(json.dumps(metrics, indent=2))
+    print(featured["label"].value_counts())
+    print(f"Wrote: {output_dir / 'message_level_features.csv'}")
+    print(f"Wrote: {output_dir / 'spam_ham_summary.csv'}")
+    print(f"Wrote: {output_dir / 'top_terms_by_label.csv'}")
+    if not topic_assignments.empty:
+        print(f"Wrote: {output_dir / 'topic_assignments.csv'}")
+        print(f"Wrote: {output_dir / 'topic_words.csv'}")
+    print(f"Wrote: {output_dir / 'model_comparison.json'}")
+    print("Model comparison:")
+    print(json.dumps(models, indent=2))
 
 
 if __name__ == "__main__":

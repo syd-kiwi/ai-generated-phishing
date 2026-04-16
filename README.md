@@ -83,11 +83,26 @@ Generates figure outputs under `outputs/figures/`, including:
 - top words bar chart (+ CSV counts),
 - top bigrams bar chart (+ CSV counts).
 
+Enron mode:
+```bash
+python src/visualizations.py --enron
+```
+Outputs are written to `outputs/enron/figures/`.
+
 ### `src/word_clouds.py`
 - Merges topic assignments with email content.
 - Builds one word cloud per discovered topic.
 
 Output directory: `outputs/wordclouds/`.
+
+Enron mode:
+```bash
+python src/word_clouds.py --source enron
+```
+Outputs are written to `outputs/enron/wordclouds/`.
+You can also use `python src/word_clouds.py --enron` as a shortcut.
+Default behavior (`--source auto`) picks Enron when `outputs/enron/message_level_features.csv` and
+`outputs/enron/topic_assignments.csv` exist; otherwise it falls back to phishing.
 
 ### `src/enron_chunk_analysis.py`
 - Parses a chunked file format where each block includes:

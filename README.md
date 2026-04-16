@@ -90,16 +90,24 @@ python src/visualizations.py --enron
 Outputs are written to `outputs/enron/figures/`.
 
 ### `src/word_clouds.py`
-- Merges topic assignments with email content.
-- Builds one word cloud per discovered topic.
+- Builds one word cloud per discovered topic **using only**:
+  - topic assignments CSV (`topic_assignments.csv` / `topics.csv`)
+  - topic words CSV (`topic_words.csv`)
 
 Output directory: `outputs/wordclouds/`.
 
 Enron mode:
 ```bash
-python src/word_clouds.py --enron
+python src/word_clouds.py \
+  --assignments-path outputs/enron/topic_assignments.csv \
+  --topic-words-path outputs/enron/topic_words.csv
 ```
-Outputs are written to `outputs/enron/wordclouds/`.
+For default phishing outputs:
+```bash
+python src/word_clouds.py \
+  --assignments-path outputs/topics.csv \
+  --topic-words-path outputs/topic_words.csv
+```
 
 ### `src/enron_chunk_analysis.py`
 - Parses a chunked file format where each block includes:

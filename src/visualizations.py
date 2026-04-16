@@ -1,5 +1,6 @@
 from pathlib import Path
 import re
+import argparse
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -22,30 +23,54 @@ def tokenize(text: str) -> list[str]:
     return re.findall(r"[a-z0-9']+", text)
 
 def main():
+    parser = argparse.ArgumentParser(description="Generate summary plots for phishing/email datasets.")
+    parser.add_argument("--emails-path", default=None, help="Path to emails table (parquet/csv).")
+    parser.add_argument("--sentiment-path", default=None, help="Path to sentiment CSV.")
+    parser.add_argument("--readability-path", default=None, help="Path to readability CSV.")
+    parser.add_argument("--output-dir", default=None, help="Directory for output figures.")
+    parser.add_argument(
+        "--enron",
+        action="store_true",
+        help="Use Enron outputs (outputs/enron/message_level_features.csv) as a single input.",
+    )
+    args = parser.parse_args()
+
     project_root = Path(__file__).resolve().parents[1]
-    out_dir = project_root / "outputs" / "figures"
+    out_dir = Path(args.output_dir) if args.output_dir else (
+        project_root / "outputs" / ("enron/figures" if args.enron else "figures")
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
 
     sns.set_theme(style="whitegrid")
 
-    # Inputs
-    emails_path = project_root / "outputs" / "emails.parquet"
-    sentiment_path = project_root / "outputs" / "sentiment.csv"
-    readability_path = project_root / "outputs" / "readability.csv"
+    if args.enron:
+        enron_features_path = Path(args.readability_path) if args.readability_path else (
+            project_root / "outputs" / "enron" / "message_level_features.csv"
+        )
+        if not enron_features_path.exists():
+            raise FileNotFoundError(f"Missing {enron_features_path}. Run src/enron_chunk_analysis.py first.")
+        df = pd.read_csv(enron_features_path)
+        text_series = df.get("combined_text", "")
+    else:
+        # Inputs
+        emails_path = Path(args.emails_path) if args.emails_path else (project_root / "outputs" / "emails.parquet")
+        sentiment_path = Path(args.sentiment_path) if args.sentiment_path else (project_root / "outputs" / "sentiment.csv")
+        readability_path = Path(args.readability_path) if args.readability_path else (project_root / "outputs" / "readability.csv")
 
-    if not emails_path.exists():
-        raise FileNotFoundError(f"Missing {emails_path}. Run ingest first.")
-    if not sentiment_path.exists():
-        raise FileNotFoundError(f"Missing {sentiment_path}. Run sentiment script first.")
-    if not readability_path.exists():
-        raise FileNotFoundError(f"Missing {readability_path}. Run readability script first.")
+        if not emails_path.exists():
+            raise FileNotFoundError(f"Missing {emails_path}. Run ingest first.")
+        if not sentiment_path.exists():
+            raise FileNotFoundError(f"Missing {sentiment_path}. Run sentiment script first.")
+        if not readability_path.exists():
+            raise FileNotFoundError(f"Missing {readability_path}. Run readability script first.")
 
-    emails = pd.read_parquet(emails_path)
-    sent = pd.read_csv(sentiment_path)
-    read = pd.read_csv(readability_path)
+        emails = pd.read_parquet(emails_path) if emails_path.suffix == ".parquet" else pd.read_csv(emails_path)
+        sent = pd.read_csv(sentiment_path)
+        read = pd.read_csv(readability_path)
 
-    # Merge for metric plots
-    df = read.merge(sent[["email_id", "compound"]], on="email_id", how="inner")
+        # Merge for metric plots
+        df = read.merge(sent[["email_id", "compound"]], on="email_id", how="inner")
+        text_series = emails["subject"].fillna("").astype(str) + " " + emails["raw_text"].fillna("").astype(str)
 
     # ----------------------------
     # 1) Metric histograms (Seaborn)
@@ -90,7 +115,7 @@ def main():
     # ----------------------------
     # 3) Top words bar chart
     # ----------------------------
-    combined_text = (emails["subject"].fillna("").astype(str) + " " + emails["raw_text"].fillna("").astype(str))
+    combined_text = pd.Series(text_series).fillna("").astype(str)
     all_tokens = []
     for t in combined_text:
         cleaned = clean_for_tokens(t)
@@ -135,10 +160,11 @@ def main():
     # ----------------------------
     texts_for_vec = combined_text.astype(str).tolist()
 
+    min_df = 5 if len(texts_for_vec) >= 5 else 1
     vec = CountVectorizer(
         stop_words="english",
         ngram_range=(2, 2),
-        min_df=5
+        min_df=min_df
     )
     X = vec.fit_transform(texts_for_vec)
     freqs = X.sum(axis=0).A1

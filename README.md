@@ -89,6 +89,26 @@ Generates figure outputs under `outputs/figures/`, including:
 
 Output directory: `outputs/wordclouds/`.
 
+### `src/enron_chunk_analysis.py`
+- Parses a chunked file format where each block includes:
+  - `file: ...`
+  - `message:`
+  - message body
+  - trailing `spam` or `ham` label line.
+- Validates chunk labels and exports all parsed chunks.
+- Runs sentiment/readability/lexical metrics on **ham-only** chunks.
+- Trains a spam classifier (XGBoost when available, with a local fallback model when unavailable) and writes evaluation metrics.
+
+Example:
+```bash
+python src/enron_chunk_analysis.py --input data/enron --output-dir outputs/enron
+```
+
+Outputs:
+- `outputs/enron/parsed_chunks.csv`
+- `outputs/enron/ham_only_analysis.csv`
+- `outputs/enron/xgboost_metrics.json`
+
 ## Outputs produced
 
 This repo already includes generated artifacts, such as:

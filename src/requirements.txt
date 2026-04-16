@@ -11,3 +11,4 @@ wordcloud
 pillow
 textstat
 seaborn
+xgboost

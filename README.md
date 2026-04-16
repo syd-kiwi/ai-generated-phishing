@@ -97,10 +97,9 @@ Output directory: `outputs/wordclouds/`.
 
 Enron mode:
 ```bash
-python src/word_clouds.py
+python src/word_clouds.py --enron
 ```
 Outputs are written to `outputs/enron/wordclouds/`.
-Use `--source phishing` to generate word clouds from the original phishing pipeline outputs.
 
 ### `src/enron_chunk_analysis.py`
 - Parses a chunked file format where each block includes:
